@@ -3,7 +3,9 @@
 teleop 명령(/cmd_vel_teleop)을 받아 그대로 /cmd_vel로 넘기다가,
 정면 거리가 stop_distance보다 가까우면 전진 속도만 0으로 바꾼다.
 회전과 후진은 막지 않아서 장애물에서 빠져나올 수 있다.
-use_monitor가 켜져 있으면 감지 모니터의 /sensor_ok가 False일 때도 전진을 막는다.
+use_monitor가 켜져 있으면 감지 모니터의 /sensor_level을 따른다.
+  FAULT    -> 거리와 상관없이 전진을 막음
+  DEGRADED -> 전진 속도를 degraded_speed 이하로 제한
 """
 import math
 
@@ -11,7 +13,9 @@ import rclpy
 from geometry_msgs.msg import Twist
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32
+from std_msgs.msg import Bool, Float32, UInt8
+
+SENSOR_OK, SENSOR_DEGRADED, SENSOR_FAULT = 0, 1, 2
 
 
 class StopController(Node):
@@ -21,23 +25,26 @@ class StopController(Node):
         self.declare_parameter('resume_margin', 0.05)   # 다시 출발하려면 이만큼 더 멀어져야 함 [m]
         self.declare_parameter('stale_timeout', 0.5)    # 거리값이 이 시간 넘게 안 오면 정지 [s], 0이면 끔
         self.declare_parameter('use_monitor', False)    # 감지 모니터 판단으로 덮어쓸지
+        self.declare_parameter('degraded_speed', 0.05)  # 센서 품질 저하 시 최대 전진 속도 [m/s]
 
         self.stop_distance = self.get_parameter('stop_distance').value
         self.resume_margin = self.get_parameter('resume_margin').value
         self.stale_timeout = self.get_parameter('stale_timeout').value
         self.use_monitor = self.get_parameter('use_monitor').value
+        self.degraded_speed = self.get_parameter('degraded_speed').value
 
         self.cmd_in = Twist()
         self.distance = math.inf
         self.last_distance_time = None
-        self.sensor_ok = False
+        self.sensor_level = SENSOR_FAULT
         self.last_monitor_time = None
         self.stopped = False
+        self.slowed = False
 
         self.create_subscription(Twist, '/cmd_vel_teleop', self.on_cmd, 10)
         self.create_subscription(Float32, '/front_distance', self.on_distance, 10)
         if self.use_monitor:
-            self.create_subscription(Bool, '/sensor_ok', self.on_sensor_ok, 10)
+            self.create_subscription(UInt8, '/sensor_level', self.on_sensor_level, 10)
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.state_pub = self.create_publisher(Bool, '/stop_state', 10)
 
@@ -53,8 +60,8 @@ class StopController(Node):
         self.distance = msg.data
         self.last_distance_time = self.get_clock().now()
 
-    def on_sensor_ok(self, msg: Bool):
-        self.sensor_ok = msg.data
+    def on_sensor_level(self, msg: UInt8):
+        self.sensor_level = msg.data
         self.last_monitor_time = self.get_clock().now()
 
     def is_old(self, stamp):
@@ -71,7 +78,7 @@ class StopController(Node):
             # 모니터가 죽어서 소식이 끊겨도 정상으로 보지 않는다
             if self.is_old(self.last_monitor_time):
                 return 'monitor silent'
-            if not self.sensor_ok:
+            if self.sensor_level >= SENSOR_FAULT:
                 return 'sensor fault'
         if self.distance < self.stop_distance:
             return f'obstacle {self.distance:.2f} m'
@@ -87,11 +94,18 @@ class StopController(Node):
             self.get_logger().info(f'RESUME: {self.distance:.2f} m')
             self.stopped = False
 
+        slowed = self.use_monitor and self.sensor_level == SENSOR_DEGRADED
+        if slowed != self.slowed:
+            self.get_logger().warn(f'SLOW: max {self.degraded_speed} m/s' if slowed else 'full speed')
+            self.slowed = slowed
+
         cmd = Twist()
         cmd.linear.x = self.cmd_in.linear.x
         cmd.angular.z = self.cmd_in.angular.z
         if self.stopped and cmd.linear.x > 0.0:
             cmd.linear.x = 0.0
+        elif slowed:
+            cmd.linear.x = min(cmd.linear.x, self.degraded_speed)
         self.cmd_pub.publish(cmd)
         self.state_pub.publish(Bool(data=self.stopped))
 

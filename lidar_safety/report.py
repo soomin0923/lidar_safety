@@ -8,10 +8,11 @@ import statistics
 import sys
 
 FAULT_ORDER = ['none', 'delay', 'zero', 'freeze', 'noise']
-MONITOR_ORDER = ['off', 'on']
+MONITOR_ORDER = ['off', 'on', 'graded']
+MONITOR_LABELS = {'off': 'monitor off', 'on': 'monitor on: stop', 'graded': 'monitor graded: slow on noise'}
 
-# 차트 색: 범주 2개(모니터 끔/켬)는 같은 순서로 고정, 충돌은 상태색(critical)으로 따로 둔다
-COLORS = {'off': '#2a78d6', 'on': '#eb6834'}
+# 차트 색: 조건마다 고정된 범주색(조건이 빠져도 색이 바뀌지 않음), 충돌은 상태색(critical)으로 따로 둔다
+COLORS = {'off': '#2a78d6', 'on': '#eb6834', 'graded': '#1baf7a'}
 CRITICAL = '#d03b3b'
 INK, INK_2, MUTED, GRID, AXIS, SURFACE = '#0b0b0b', '#52514e', '#898781', '#e1e0d9', '#c3c2b7', '#fcfcfb'
 
@@ -68,16 +69,17 @@ def plot(rows, png_path):
     from matplotlib.patches import Patch
 
     faults, speeds, monitors = groups(rows)
-    fig, axes = plt.subplots(1, len(speeds), figsize=(5.2 * len(speeds), 4.2), sharey=True, squeeze=False)
+    fig, axes = plt.subplots(1, len(speeds), figsize=(max(5.2 * len(speeds), 8.0), 4.2), sharey=True, squeeze=False)
     fig.patch.set_facecolor(SURFACE)
-    bar_w = 0.36
+    gap = 0.04  # 막대 사이 간격
+    bar_w = (0.76 - gap * (len(monitors) - 1)) / len(monitors)
     inject = mean_of(rows, 'inject_clearance')
     ymax = max([r['final_clearance'] for r in rows] + [inject or 0]) * 1.15 + 0.05
 
     for ax, speed in zip(axes[0], speeds):
         ax.set_facecolor(SURFACE)
         for mi, mon in enumerate(monitors):
-            offset = (mi - (len(monitors) - 1) / 2) * (bar_w + 0.04)  # 막대 사이 간격
+            offset = (mi - (len(monitors) - 1) / 2) * (bar_w + gap)
             for fi, fault in enumerate(faults):
                 g = [r for r in rows if r['fault'] == fault and r['speed'] == speed and r['monitor'] == mon]
                 if not g:
@@ -109,13 +111,15 @@ def plot(rows, png_path):
         ax.spines['bottom'].set_color(AXIS)
 
     axes[0][0].set_ylabel('Final clearance to wall (m)', color=INK_2)
-    handles = [Patch(color=COLORS[m], label=f'monitor {m} (mean)') for m in monitors]
+    handles = [Patch(color=COLORS[m], label=f'{MONITOR_LABELS.get(m, m)} (mean)') for m in monitors]
     handles += [Line2D([], [], marker='o', color=INK, linestyle='none', markersize=5, label='each trial'),
                 Line2D([], [], marker='X', color=CRITICAL, linestyle='none', markersize=8, label='collision')]
-    fig.legend(handles=handles, loc='upper center', ncol=len(handles), frameon=False,
+    fig.legend(handles=handles, loc='upper center', ncol=min(len(handles), 3), frameon=False,
                labelcolor=INK_2, bbox_to_anchor=(0.5, 1.0))
-    fig.suptitle(f'Lidar fault injected at {inject or 0:.1f} m clearance while driving at the wall',
-                 color=INK, fontsize=12, x=0.01, ha='left', y=1.08)
+    angle = rows[0].get('wall_angle_deg') or '0'
+    wall = 'the wall' if float(angle) == 0 else f'a wall tilted {float(angle):.0f}°'
+    fig.suptitle(f'Lidar fault injected at {inject or 0:.1f} m clearance while driving at {wall}',
+                 color=INK, fontsize=12, x=0.01, ha='left', y=1.08 if len(handles) <= 3 else 1.14)
     fig.tight_layout()
     fig.savefig(png_path, dpi=150, bbox_inches='tight', facecolor=SURFACE)
     plt.close(fig)
